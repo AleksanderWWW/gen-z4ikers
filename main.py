@@ -6,6 +6,21 @@ import streamlit as st
 from geopy.geocoders import Nominatim
 import pydeck as pdk
 
+from langchain_ollama import ChatOllama
+from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
+
+
+# Initialize LLM
+@st.cache_resource
+def get_llm():
+    return ChatOllama(
+        model="gemma3:latest",
+        temperature=0,
+        streaming=True
+    )
+
+llm = get_llm()
+
 def score_to_color(score):
     if score < 5:
         return [255, 255, 255, 180]  # white-ish
@@ -17,7 +32,7 @@ def score_to_color(score):
     return [180, 0, 0, 200]      # dark red
 
 
-df = pd.read_csv("Finale/final_df_with_opportunity_scores.csv")
+df = pd.read_csv("Finale/final_df_with_opportunity_scores2.csv")
 df['polygon'] = df['polygon'].apply(literal_eval)
 
 
@@ -74,7 +89,7 @@ filtered_df = df[
 
 data = filtered_df.iloc[:5]  # 5 first rows
 
-selected_index = st.sidebar.selectbox("Zoom to top result (by index):", ["Brak wyboru"] +
+selected_index = st.sidebar.selectbox("Przybliż do najwyższego wyniku (po indeksie):", ["Brak wyboru"] +
                                       [f"Wynik {i + 1}" for i in range(len(data.index))])
 
 if selected_index != "Brak wyboru":
@@ -141,11 +156,79 @@ for num, (_, row) in enumerate(data.iterrows()):
     st.sidebar.write(f"**Longitude:** {row['longitude']:.5f}")
     st.sidebar.write("---")
 
+print(data.columns)
 
-clicked = st.button("Explain results")
 
-if clicked:
-    explanation = "bla bla bla"
+# Prepare structured feature importance information
+feature_importance_text = """
+Najważniejsze cechy wpływające na ocenę lokalizacji (wg ważności):
 
-    st.text(explanation)
+Kluczowe cechy (najwyższy wpływ):
+- footway (chodniki)
+- parking
 
+Istotne cechy (średni wpływ):
+- supermarket
+- latitude (szerokość geograficzna)
+- tram_stop (przystanki tramwajowe)
+- atm (bankomaty)
+- convenience (sklepy convenience)
+- residential (obszary mieszkalne)
+- living_street (strefy zamieszkania)
+"""
+
+if selected_index != "Brak wyboru":
+    # Prepare prompt
+    system_prompt = f"""Jesteś ekspertem ds. analizy lokalizacji, pomagającym użytkownikom zrozumieć potencjalne możliwości umieszczenia paczkomatów.
+
+    Otrzymasz szczegółowe dane dotyczące obszaru siatki 2km x 2km wraz z oceną potencjału (w skali 0-100) wskazującą na możliwość umieszczenia nowego paczkomatu. Wyższe wyniki oznaczają lepsze lokalizacje.
+
+    Wyjaśniając ocenę potencjału użytkownikom:
+    1. Zacznij od jasnego, jednozdaniowego podsumowania ogólnego potencjału lokalizacji (doskonały, dobry, umiarkowany lub słaby)
+    2. Podkreśl 3-4 najważniejsze czynniki wpływające na tę ocenę, koncentrując się na:
+    - Istniejącej infrastrukturze (obecne paczkomaty, parkingi, transport publiczny)
+    - Demografii (gęstość zaludnienia, dochody gospodarstw domowych)
+    - Dostępności (główne drogi, ruch pieszy, dostęp całodobowy)
+    - Czynnikach komercyjnych (punkty zainteresowania, kategoria zagospodarowania terenu)
+    3. Przedstaw krótką, możliwą do realizacji rekomendację na podstawie danych
+
+    Utrzymaj swoją odpowiedź zwięzłą (łącznie 3-5 zdań). Używaj konwersacyjnego języka, który będzie zrozumiały dla nietechnicznych odbiorców.
+
+    Weź pod uwagę również ważność zmiennych z modelu:
+    {feature_importance_text}
+    """
+
+    human_prompt = f"""Proszę wyjaśnij ocenę potencjału i kluczowe spostrzeżenia dla lokalizacji na siatce:
+    
+    Dane lokalizacji oznaczające liczbę poniższych punktów:
+    - Footway (chodniki): {data.iloc[int(selected_index.split(" ")[-1]) - 1]['footway']:.0f}
+    - Parking: {data.iloc[int(selected_index.split(" ")[-1]) - 1]['parking']:.0f}
+    - Supermarket: {data.iloc[int(selected_index.split(" ")[-1]) - 1]['supermarket']:.0f}
+    - Współrzędne: {data.iloc[int(selected_index.split(" ")[-1]) - 1]['latitude']:.5f}, {data.iloc[int(selected_index.split(" ")[-1]) - 1]['longitude']:.5f}
+    - Przystanki tramwajowe: {data.iloc[int(selected_index.split(" ")[-1]) - 1]['tram_stop']:.0f}
+    - Bankomaty: {data.iloc[int(selected_index.split(" ")[-1]) - 1]['atm']:.0f}
+    - Sklepy convenience: {data.iloc[int(selected_index.split(" ")[-1]) - 1]['convenience']:.0f}
+    - Obszary mieszkalne: {data.iloc[int(selected_index.split(" ")[-1]) - 1]['residential']:.0f}
+    - Strefy zamieszkania: {data.iloc[int(selected_index.split(" ")[-1]) - 1]['living_street']:.0f}
+    
+    Potencjał lokalizacji: {data.iloc[int(selected_index.split(" ")[-1]) - 1][score_col]:.2f}/100
+    """
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_prompt)
+    ]
+
+# Run analysis button
+if st.button("Wyjaśnij wyniki"):
+    with st.spinner("Analyzing location data..."):
+        with st.chat_message("assistant"):
+            response_container = st.empty()
+            full_response = ""
+            
+            # Stream the response
+            for chunk in llm.stream(messages):
+                if isinstance(chunk, AIMessage):
+                    text_chunk = chunk.content
+                    full_response += text_chunk
+                    response_container.markdown(full_response)
